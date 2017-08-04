@@ -1,0 +1,179 @@
+package Connect_server;
+import Jama.Matrix;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.EOFException;
+import java.io.IOException;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.net.SocketException;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
+ 
+//This is the server-client thread
+public class RequestHandler implements Runnable {
+  private final Socket client;
+  ServerSocket serverSocket = null;
+  Calculations c = new Calculations();
+  Game_database db = new Game_database();
+  //As of right now, we do not have access to biometric data sensors
+  //so we use this dummy data in the meantime
+  double stress = 0.988;
+ 
+    public RequestHandler(Socket client) {
+      this.client = client;
+    }
+ 
+    //This thread continually received data from the client
+    @Override
+    public void run() {
+       
+        class thread extends Thread {
+            @Override
+            public void run() {
+                try (DataInputStream inputStream = new DataInputStream(client.getInputStream());
+                 DataOutputStream outputStream = new DataOutputStream(client.getOutputStream());) {
+                System.out.println("Thread started with name:" + Thread.currentThread().getName());
+ 
+                while (true){
+                //inputStream reads data sent by the client
+                int correct = inputStream.readInt();
+                int incorrect = inputStream.readInt();
+                int prevailed = inputStream.readInt();
+                double time = inputStream.readDouble();
+                double old_x = inputStream.readDouble();
+                double old_y = inputStream.readDouble();
+      
+                //Calculates accuracy as a ratio of correct clicks to incoorect clicks
+                // and prevailed enemies
+                double accuracy = c.accuracy(correct, incorrect, prevailed);
+                // inserts data into database
+                db.check(time, accuracy, stress);
+                //Caluclates new border depending on stress and accuracy
+                double[] coordinates = c.new_border(stress, accuracy, old_x, old_y);
+                        
+                double x = coordinates[0];
+                double y = coordinates[1];
+               
+                //outputStream sends new X and Y coordinates to the client
+                outputStream.writeDouble(x);
+                outputStream.writeDouble(y);
+   }
+} catch (SocketException e) {
+   System.out.print("SocketException caught:" + e);
+} catch (EOFException eof) {
+    System.out.println("EOFException caught!: " + eof);
+} catch (IOException e) {
+   System.out.println("IOException caught!: " + e);
+} catch (Exception ex) {
+   System.out.println("Exceprion in Thread Run. Exception : " + ex);
+}
+    }}
+        //starts data sending and receiving thread
+    Thread thread = new thread();
+    thread.start();
+    }
+}
+ 
+// connects and inputs data into database
+class Game_database{
+  
+    // to anaylze the data, we want to get a baseline first
+    //we get our baseline on the first run of this program
+    //in this method we check to see if the baseline database is empty
+    //if it is, we know that we need a baseline, so we populate the baseline table
+    // if not, we run Game metrics.  The arugments of this method
+    // is the data we will input into the table
+    public void check(double t, double a, double s) throws SQLException{
+        //the connection to the datatbase. the username ("hamel") and password ("Scout73%") will be different
+        // depending who created the database
+        Connection con = DriverManager.getConnection("jdbc:derby://localhost:1527/Game_data", "hamel", "Scout73%");
+        // this creates a SQL statement to talk to the database
+        Statement stat = con.createStatement();
+        String SQL = "SELECT * FROM baseline";
+        ResultSet rs = stat.executeQuery(SQL);
+        if (rs == null){
+            baseline(t, a, s);
+        } else {
+            gameMetrics(t, a, s);
+        }
+    }
+  
+    public void baseline(double t, double a, double s)throws SQLException{
+        Connection con = DriverManager.getConnection("jdbc:derby://localhost:1527/Game_data", "hamel", "Scout73%");
+        String sql = "INSERT INTO baseline VALUES (?, ?, ?, ?)";
+        PreparedStatement stmt = con.prepareStatement(sql);
+        //Enter in player thread name, time, accuracy and stress
+        stmt.setString(1, Thread.currentThread().getName());
+        stmt.setDouble(2, t);
+        stmt.setDouble(3, a);
+        stmt.setDouble(4, s);
+        stmt.executeUpdate();
+    }
+  
+    public void gameMetrics(double t, double a, double s)throws SQLException{
+        Connection con = DriverManager.getConnection("jdbc:derby://localhost:1527/Game_data", "hamel", "Scout73%");
+        String sql = "INSERT INTO baseline VALUES (?, ?, ?, ?)";
+        PreparedStatement stmt = con.prepareStatement(sql);    
+        //Enter in player thread name, time, accuracy and stress
+        stmt.setString(1, Thread.currentThread().getName());
+        stmt.setDouble(2, t);
+        stmt.setDouble(3, a);
+        stmt.setDouble(4, s);
+        stmt.executeUpdate();
+    }
+}
+ 
+//Here, we do our calculations, such as accuracy and new X Y coordinates for
+// the player border
+class Calculations{
+    public double[] coordinates = new double[2];
+  
+    //this method calculates accuracy
+    public double accuracy(int correct, int incorrect, int prevailed){
+        double accuracy = correct/ (incorrect + prevailed);
+        return accuracy;
+    }
+   
+    //this calculates the new border
+    public double[] new_border(double stress, double accuracy, double old_x, double old_y){
+       
+        //This utilizes a rotational matrix to calculate the new X and Y
+        //This if statement is an example of what one might do
+        //HIGHLY recommend changing it depending on what might best
+        //fit the project.  This also may change depending on how we choose to utilize the AI
+        // As in if the AI predict the user will become too stressed and accuracy, may go down
+        // the machine will choose to go through this process
+        if (stress > 1 && accuracy > 2){
+        // Uses the stress and accuracy of the player to calculate the angle
+        // HIGHLY recommend tweaking this angle caluclation as this may not
+        // be the best way to go about it.  Angle does have to be contingent
+        // upon stress and accuracy, as this is that determines the reallocation of
+        // playing field space
+        double angle = stress * accuracy * Math.PI * 2;
+       
+        // gets distance from center
+        double vector1 = old_x - 290.0;
+        double vector2 = old_y - 275.0;
+ 
+        // makes rotate matrix and multplies it from vector ot the X and Y distance from center
+        double rotate[][]= {{Math.cos(angle), (-Math.sin(angle))},{(Math.sin(angle)),Math.cos(angle)}};
+        Matrix a = new Matrix(rotate);
+        Matrix b = new Matrix(new double[]{vector1, vector2}, 1);
+        Matrix c = b.times(a);
+        double[][] index = c.getArray();
+        double new_x = index[0][0];
+        double new_y = index[0][1];
+        coordinates = new double[] {new_x, new_y};
+        } else {
+            //if stress and accuracy aren't within range, keep old coordinates
+        coordinates = new double[] {old_x, old_y};
+        }
+ 
+        return coordinates;
+    }
+}
